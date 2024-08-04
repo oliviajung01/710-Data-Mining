@@ -1,0 +1,168 @@
+---
+title: The Development and Evaluation of a Multivariate Logistic Regression Model
+  Predicting 30 Day Readmission Risk for Adult Patients
+author: "Olivia Jung"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: united
+    toc: true
+    toc_float: true
+    highlight: tango
+    code_folding: hide
+    css: styles.css
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(glmnet)
+library(ROCR)
+library(Matrix)
+load("~/Dropbox/My Mac (MacBook Pro)/Desktop/710 Data Mining Course/Readmit.RData")
+```
+
+## Introduction
+
+Readmission within 30 days of discharge is a significant issue in healthcare, leading to increased costs and poor patient outcomes. Accurate prediction models can help identify patients at high risk of readmission, allowing for targeted interventions and efficient allocation of resources to prevent this unwanted future event form occurring.
+
+This project aimed to develop and validate a logistic regression model using lasso regularization to predict the likelihood of a patient being readmitted to the hospital within a 30-day time frame, improving upon the existing model, the LACE score.
+
+## Data Description
+
+The full dataset prior to prep for model development contained 65 variables on 30,419 inpatient encounters at a regional health system's largest hospital. Each row in the data represents a single encounter, containing information about various aspects of both the patient and the encounter. For those encounters having an all-cause readmission event within 30 days of discharge, selected aspects of the readmission encounter are also included.
+
+To ensure the fitted model did not contain these aspects and the outcome of importance, these predictors were removed. (See Data Preparation section in Methods below for more details).
+
+## Predictor Descriptions
+
+For detailed descriptions of each predictor, please refer to the [Variable Description PDF](https://notability.com/n/2N~PX3gpGBhtnHD8HbhNjP').
+
+## Model Development and Validation
+
+### Preliminaries: Load Libraries and Data
+
+```{r}
+#library(glmnet)
+#library(ROCR)
+#library(Matrix)
+#load("Readmit.RData")
+```
+
+### Data Preparation
+
+To ensure the model was blind from the outcome to be predicted the prohibited variables were removed from the loaded readmit. The code below removes the LACE scores and probabilities as well as any variable having to do with a subsequent readmission.
+
+```{r}
+readmit_proj <- readmit[,-c(5,6,45:63)]
+```
+
+Furthermore, caution was taken to prevent overfitting by separating the data into train and test datasets, which also helps provide external validity during evaluation of performance.
+
+```{r}
+train <- readmit_proj[1:27000,]
+test <- readmit_proj[27001:30419,]
+```
+
+### Set Up Model Matrix
+
+```{r}
+#set up model matrix and an outcome vector for readmit.train data set
+y.train <- train$ReadmitFLG
+
+x.train <- sparse.model.matrix(object = ReadmitFLG ~ . -1, data = train)
+
+x.test <- sparse.model.matrix(object = ReadmitFLG ~ . -1, data = test)
+```
+
+### Fitting the Model
+
+A logistic regression model was fit using the lasso approach (alpha =1) in the "cv.glmnet" function from the glm.net library. All remaining variables were used as predictors.
+
+This particular shrinking method was viewed as favorable for its ability to adequately address bivariate relationships between predictors in the data and its ability to help calibrate and prevent overfitting, all at the expense for a slight increase in bias.
+
+```{r}
+lasso.mod <- cv.glmnet(x = x.train, y = y.train, alpha = 1, family = "binomial")
+```
+
+### Tuning the Penalty Parameter (Lambda)
+
+The plot below depicts the lasso 10-fold cross-validation prediction test errors by varying model size and the corresponding values for lambda.
+
+```{r}
+plot(lasso.mod)
+```
+
+### Selecting a Model From the Lasso Cross-Validation Prediction Error Plot
+
+Above, the first dotted vertical line from the left represents the model with the lowest estimated test error. But, ultimately, the second dotted vertical line from the left, the one that is 1 standard deviation away was selected. Compared to the lowest error model, this choice helps control for the inherent variance in estimations and chooses a sparser model for a gain in interpretation.
+
+The below code was used to select this model and view the corresponding coefficient estimates. Notice how the lasso was able to shrink certain coefficients completely to zero, succesfully selecting for certain variables at the selected constraint chosen for lambda.
+
+```{r}
+coef(lasso.mod, s = "lambda.1se")
+```
+
+## Making the Predictions on Test Data
+
+Predictions were made by using the previously prepared, "x.test" sparse model matrix, which uses never before seen x inputs from our held out test dataset.
+
+```{r}
+lasso.pred <- predict(object=lasso.mod, newx = x.test, s='lambda.1se', type = "response")
+```
+
+## Measuring Model Performance
+
+**Measuring Discrimination:** The model's performance was visualized using a receiver operating characteristic (ROC) graph and plotted against the ROC curve for the LACE Score prediction performance.
+
+The Lasso Model (blue) seems to perform slightly better than the LACE Score Model (red).
+
+```{r LACE-predictions, echo=FALSE}
+ROCRpred_LACE <- prediction(predictions = readmit$LACEScoreNBR,
+                           labels = readmit$ReadmitFLG)
+ROCRperf_LACE <- performance(prediction.obj = ROCRpred_LACE,
+                            measure = "tpr",
+                            x.measure = "fpr")
+```
+
+```{r}
+lasso.ROCR.pred <- prediction(predictions = lasso.pred,
+                       labels= test$ReadmitFLG)
+lasso.ROCR.obj <- performance(prediction.obj = lasso.ROCR.pred,
+                        measure = "tpr",
+                        x.measure = "fpr")
+plot(lasso.ROCR.obj, col = 'blue', main = "ROC Curve for Lasso and LACE Models")
+plot(ROCRperf_LACE, col= 'red', add =TRUE)
+legend("bottomright", legend = c("Lasso Model", "LACE Model"), col = c("blue", "red"), lwd = 2)
+abline(a=0, b=1)
+```
+
+To confirm this, the area under the curve was computed to compare each model. The Lasso Model's performed slightly better than the LACE Score, gaining about 0.01 AUC.
+
+```{r}
+lasso.ROCR.obj <- performance(prediction.obj = lasso.ROCR.pred,
+                        measure = "auc") #lasso performance object code
+
+ROCRpred_LACE_AUC <- performance(prediction.obj = ROCRpred_LACE,
+                                measure = "auc") # LACE score performance object code
+
+lasso.ROCR.obj@y.values # lasso auc 
+ROCRpred_LACE_AUC@y.values # LACE score auc
+```
+
+## Discussion
+
+### **Limitations**
+
+The Lasso can set many coefficients to zero, which aids in variable selection and model simplicity. It's important to recognize that this approach can also mask the importance of variables that are slightly associated with each other, or collinear, by only picking one. And in terms of clinical understanding the model's coefficients and decisions may not always align with every clinical setting or the medical intuition that clinicians have from experience.
+
+Furthermore, the model is trained on data from a specific hospital or healthcare system. This may limit its applicability to different patient populations or healthcare settings where patient populations differ. It is also important to keep in mind that the although the dataset has a large sample size, the data still might not be representative in terms of diversity.
+
+### **Interpretation:**
+
+While the lasso model showed a slight improvement over the LACE score (AUC gain of 0.01), this slight gain may not justify replacing the simpler LACE Score Model that is very close in performance measure.
+
+### Implications:
+
+The adoption of the lasso model in clinical practice should consider the trade-offs between the marginal performance gains and the increased complexity, and interpretation limitations that might deter clinicians from wanting to utilize it over the simpler LACE Score Model.
